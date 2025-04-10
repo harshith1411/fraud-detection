@@ -102,6 +102,16 @@ if uploaded_file:
             st.dataframe(anomalies[['reason', 'amount', 'happay_fee_amount', 'mcc',
                                      'txn_currency_code', 'channel', 'pan_entry_mode']])
 
+            # Add download button before Explanation Dashboard section
+            csv_data = anomalies.to_csv(index=False).encode('utf-8')
+            # st.write("### Download Anomaly Report")
+            st.download_button(
+                label="Download Report",
+                data=csv_data,
+                file_name="flagged_transactions_with_reasons.csv",
+                mime="text/csv"
+            )
+
             # SHAP Explanations with Index Alignment
             try:
                 explainer = shap.TreeExplainer(model)
@@ -133,9 +143,6 @@ if uploaded_file:
                             st.bar_chart(contribs)
 
                         st.markdown("---")
-
-                anomalies.to_csv("flagged_transactions_with_reasons.csv", index=False)
-                st.success("Results saved to flagged_transactions_with_reasons.csv")
 
             except Exception as e:
                 st.error(f"SHAP explanation failed: {str(e)}")
