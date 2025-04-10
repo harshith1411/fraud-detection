@@ -6,94 +6,107 @@ import shap
 from streamlit_shap import st_shap
 
 # Title of the App
-st.title("Fraud Detection System with Explanations V2")
+st.title("Advanced Fraud Detection System with Explanations")
 
 # Step 1: Upload CSV File
-uploaded_file = st.file_uploader("Upload your transaction CSV file", type=["csv"])
+uploaded_file = st.file_uploader("Upload transaction CSV file", type=["csv"])
 
 if uploaded_file:
     try:
-        # Load the CSV file into a DataFrame
-        data = pd.read_csv(uploaded_file, parse_dates=['transmission_date_time'], dayfirst=True)
+        # Define a custom date parser to avoid inconsistent parsing
+        def custom_date_parser(date_str):
+            return pd.to_datetime(date_str, format='%Y-%m-%dT%H:%M:%S', errors='coerce')
+
+        # Load the CSV file into a DataFrame with consistent date parsing
+        data = pd.read_csv(
+            uploaded_file,
+            parse_dates=['transmission_date_time'],
+            date_parser=custom_date_parser
+        )
         st.write("### Uploaded Data Preview")
         st.dataframe(data.head())
 
-        # Step 2: Preprocessing and Feature Engineering
+        # Validate required columns
         required_columns = [
             'user_id', 'mcc', 'amount', 'transmission_date_time',
-            'txn_currency_code', 'channel', 'pan_entry_mode'
+            'txn_currency_code', 'channel', 'pan_entry_mode',
+            'a_id', 'm_id', 'happay_fee_amount'
         ]
-
+        
         missing = [col for col in required_columns if col not in data.columns]
         if missing:
             st.error(f"Missing required columns: {missing}")
             st.stop()
 
-        # Fill missing values and preprocess MCC codes
+        # Feature Engineering
         data['amount'] = data['amount'].fillna(0).abs()  # Ensure positive amounts
-        data['mcc'] = data['mcc'].astype(str).str.zfill(4)  # Ensure MCC codes are 4 digits
+        data['happay_fee_amount'] = data['happay_fee_amount'].fillna(0).abs()
+        data['mcc'] = data['mcc'].astype(str).str.zfill(4)
+        data['a_id'] = data['a_id'].astype(str)
+        data['m_id'] = data['m_id'].astype(str)
+        data['pan_entry_mode'] = data['pan_entry_mode'].astype(str)
 
-        # Feature Engineering (include all relevant columns)
+        # Add temporal features
         data['hour'] = data['transmission_date_time'].dt.hour
         data['day_of_week'] = data['transmission_date_time'].dt.dayofweek
 
+        # Create feature matrix
         features = pd.get_dummies(
-            data[['amount', 'mcc', 'txn_currency_code', 'channel', 'pan_entry_mode', 'hour', 'day_of_week']],
-            columns=['mcc', 'txn_currency_code', 'channel', 'pan_entry_mode']
+            data[['amount', 'happay_fee_amount', 'mcc', 'txn_currency_code',
+                  'channel', 'pan_entry_mode', 'a_id', 'm_id', 'hour', 'day_of_week']],
+            columns=['mcc', 'txn_currency_code', 'channel', 'pan_entry_mode', 'a_id', 'm_id']
         )
 
-        # Step 3: Train Isolation Forest Model
+        # Train Isolation Forest model
         model = IsolationForest(
             contamination=0.05,
             random_state=42,
-            n_estimators=100,
-            max_samples='auto',
-            max_features=1.0
+            n_estimators=150,
+            max_samples=0.8
         )
         model.fit(features)
 
-        # Step 4: Detect Anomalies
+        # Detect anomalies
         data['anomaly_score'] = model.decision_function(features)
-        data['is_anomaly'] = model.predict(features)
+        data['is_anomaly'] = np.where(data['anomaly_score'] < np.percentile(data['anomaly_score'], 1), -1, 1)
         anomalies = data[data['is_anomaly'] == -1]
 
         if not anomalies.empty:
-            # Step 5: Generate Explanations with SHAP and Reasons
+            # Generate explanations with SHAP and reasons
+            user_profiles = data.groupby('user_id').agg({
+                'amount': ['mean'],
+                'happay_fee_amount': ['mean'],
+                'mcc': lambda x: x.mode()[0] if not x.mode().empty else "Unknown",
+                'txn_currency_code': lambda x: x.mode()[0] if not x.mode().empty else "Unknown",
+                'channel': lambda x: x.mode()[0] if not x.mode().empty else "Unknown",
+                'pan_entry_mode': lambda x: x.mode()[0] if not x.mode().empty else "Unknown",
+                'hour': lambda x: x.mode()[0] if not x.mode().empty else "Unknown"
+            }).droplevel(1, axis=1)
 
-            # Create user profiles for reasoning
-            user_profiles = data.groupby('user_id').agg(
-                avg_amount=('amount', 'mean'),
-                common_mcc=('mcc', lambda x: x.mode()[0] if not x.mode().empty else "Unknown"),
-                common_currency=('txn_currency_code', lambda x: x.mode()[0] if not x.mode().empty else "Unknown"),
-                common_channel=('channel', lambda x: x.mode()[0] if not x.mode().empty else "Unknown"),
-                common_pan_entry_mode=('pan_entry_mode', lambda x: x.mode()[0] if not x.mode().empty else "Unknown"),
-                common_hour=('hour', lambda x: x.mode()[0] if not x.mode().empty else "Unknown")
-            )
-
-            # Generate reasons for flagged anomalies
             reasons = []
             for idx, row in anomalies.iterrows():
                 profile = user_profiles.loc[row['user_id']]
                 reasons.append(
-                    f"Amount ₹{row['amount']:.2f} (vs usual ₹{profile['avg_amount']:.2f}) | "
-                    f"MCC {row['mcc']} (common: {profile['common_mcc']}) | "
-                    f"Currency {row['txn_currency_code']} (common: {profile['common_currency']}) | "
-                    f"Channel {row['channel']} (common: {profile['common_channel']}) | "
-                    f"Entry Mode {row['pan_entry_mode']} (common: {profile['common_pan_entry_mode']}) | "
-                    f"Hour {row['hour']} (common: {profile['common_hour']})"
+                    f"Amount ₹{row['amount']:.2f} (avg: ₹{profile['amount']:.2f}) | "
+                    f"Fee ₹{row['happay_fee_amount']:.2f} | "
+                    f"MCC {row['mcc']} | "
+                    f"Currency {row['txn_currency_code']} | "
+                    f"Channel {row['channel']} | "
+                    f"Entry Mode {row['pan_entry_mode']} | "
+                    f"Hour {row['hour']} (common: {profile['hour']})"
                 )
 
             anomalies.insert(0, 'reason', reasons)
 
             st.write("## 🚨 Detected Anomalies")
-            st.dataframe(anomalies[['reason', 'amount', 'mcc', 'channel', 'pan_entry_mode']])
+            st.dataframe(anomalies[['reason', 'amount', 'happay_fee_amount', 'mcc',
+                                     'txn_currency_code', 'channel', 'pan_entry_mode']])
 
             # SHAP Explanations with Index Alignment
             try:
                 explainer = shap.TreeExplainer(model)
                 shap_values = explainer.shap_values(features)
 
-                # Reset indices to ensure alignment
                 features.reset_index(drop=True, inplace=True)
                 anomalies.reset_index(drop=True, inplace=True)
 
@@ -121,7 +134,7 @@ if uploaded_file:
 
                         st.markdown("---")
 
-                anomalies.to_csv("flagged_transactions_with_reasons_v2.csv", index=False)
+                anomalies.to_csv("flagged_transactions_with_reasons.csv", index=False)
                 st.success("Results saved to flagged_transactions_with_reasons.csv")
 
             except Exception as e:
