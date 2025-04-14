@@ -24,6 +24,7 @@ if uploaded_file:
             parse_dates=['transmission_date_time'],
             date_parser=custom_date_parser
         )
+
         st.write("### Uploaded Data Preview")
         st.dataframe(data.head())
 
@@ -33,7 +34,7 @@ if uploaded_file:
             'txn_currency_code', 'channel', 'pan_entry_mode',
             'a_id', 'm_id', 'happay_fee_amount'
         ]
-        
+
         missing = [col for col in required_columns if col not in data.columns]
         if missing:
             st.error(f"Missing required columns: {missing}")
@@ -52,7 +53,7 @@ if uploaded_file:
         # Create feature matrix
         features = pd.get_dummies(
             data[['amount', 'happay_fee_amount', 'mcc', 'txn_currency_code',
-                  'channel', 'pan_entry_mode', 'a_id', 'm_id', 'hour', 'day_of_week']],
+                'channel', 'pan_entry_mode', 'a_id', 'm_id', 'hour', 'day_of_week']],
             columns=['mcc', 'txn_currency_code', 'channel', 'pan_entry_mode', 'a_id', 'm_id']
         )
 
@@ -63,22 +64,21 @@ if uploaded_file:
             n_estimators=150,
             max_samples=0.8
         )
+
         model.fit(features)
 
         # Detect anomalies
         data['anomaly_score'] = model.decision_function(features)
-        
         # Flag the bottom 5% of scores as anomalies
         threshold = np.percentile(data['anomaly_score'], 1)
         data['is_anomaly'] = np.where(data['anomaly_score'] < threshold, -1, 1)
-        
         # Get all anomalies (no filtering)
         anomalies = data[data['is_anomaly'] == -1].sort_values('anomaly_score')
 
         if not anomalies.empty:
             # Show total count
             st.info(f"Found {len(anomalies)} anomalies.")
-            
+
             # Generate explanations
             user_profiles = data.groupby('user_id').agg({
                 'amount': ['mean'],
@@ -90,17 +90,41 @@ if uploaded_file:
                 'hour': lambda x: x.mode()[0] if not x.mode().empty else "Unknown"
             }).droplevel(1, axis=1)
 
+            # Modified code to show only the most significant reason
             reasons = []
             for idx, row in anomalies.iterrows():
                 profile = user_profiles.loc[row['user_id']]
-                reasons.append(
-                    f"Amount ₹{row['amount']:.2f} (avg: ₹{profile['amount']:.2f}) | "
-                    f"Fee ₹{row['happay_fee_amount']:.2f} | "
-                    f"MCC {row['mcc']} | "
-                    f"Currency {row['txn_currency_code']} | "
-                    f"Channel {row['channel']}"
-                )
+                
+                # Calculate relative deviations for numerical columns
+                amount_deviation = abs((row['amount'] - profile['amount']) / max(profile['amount'], 1))
+                fee_deviation = abs((row['happay_fee_amount'] - profile['happay_fee_amount']) / max(profile['happay_fee_amount'], 1))
+                
+                # Check for mismatches in categorical columns
+                mcc_mismatch = row['mcc'] != profile['mcc']
+                currency_mismatch = row['txn_currency_code'] != profile['txn_currency_code']
+                channel_mismatch = row['channel'] != profile['channel']
+                entry_mode_mismatch = row['pan_entry_mode'] != profile['pan_entry_mode']
+                
+                # Determine the hour difference (circular)
+                hour_diff = min((row['hour'] - profile['hour']) % 24, (profile['hour'] - row['hour']) % 24)
+                hour_deviation = hour_diff / 12  # Normalize to [0, 1] range
+                
+                # Create a dictionary of deviations with descriptive reasons
+                deviations = {
+                    f"Unusual amount: ₹{row['amount']:.2f} vs avg ₹{profile['amount']:.2f}": amount_deviation,
+                    f"Unusual fee: ₹{row['happay_fee_amount']:.2f} vs avg ₹{profile['happay_fee_amount']:.2f}": fee_deviation,
+                    f"Unusual merchant category: {row['mcc']}": 1.0 if mcc_mismatch else 0.0,
+                    f"Unusual currency: {row['txn_currency_code']}": 1.0 if currency_mismatch else 0.0,
+                    f"Unusual channel: {row['channel']}": 1.0 if channel_mismatch else 0.0,
+                    f"Unusual entry mode: {row['pan_entry_mode']}": 1.0 if entry_mode_mismatch else 0.0,
+                    f"Unusual time: {row['hour']}:00 vs typical {profile['hour']}:00": hour_deviation
+                }
+                
+                # Find the most significant reason
+                most_significant_reason = max(deviations, key=deviations.get)
+                reasons.append(most_significant_reason)
 
+            # Add the significant reason column to anomalies DataFrame
             anomalies.insert(0, 'reason', reasons)
 
             # Display results
@@ -178,6 +202,7 @@ if uploaded_file:
                     
                     if len(user_txns) > 1:  # Only if user has multiple transactions
                         col1, col2 = st.columns(2)
+                        
                         with col1:
                             # Amount history
                             fig, ax = plt.figure(figsize=(8, 4)), plt.gca()
@@ -187,7 +212,7 @@ if uploaded_file:
                             ax.set_title("User Transaction Amount History")
                             ax.legend()
                             st.pyplot(fig)
-                        
+                            
                         with col2:
                             # Time of day pattern
                             fig, ax = plt.figure(figsize=(8, 4)), plt.gca()
@@ -200,7 +225,7 @@ if uploaded_file:
                             st.pyplot(fig)
                     
                     st.markdown("---")
-            
+
             # Overall feature importance
             st.write("## 📈 Overall Anomaly Analysis")
             
@@ -246,12 +271,9 @@ if uploaded_file:
                 
             except Exception as e:
                 st.error(f"PCA visualization failed: {str(e)}")
-        
         else:
             st.success("✅ No anomalies found!")
-    
     except Exception as e:
         st.error(f"Error processing file: {str(e)}")
-
 else:
     st.info("📁 Please upload a CSV file to begin analysis.")
